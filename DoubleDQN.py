@@ -2,18 +2,18 @@
 import numpy as np
 import tensorflow as tf
 
-class DQN:
+class DoubleDQN:
     def __init__(self,
                  n_actions,
                  n_features,
-                 learning_rate=0.01,
+                 learning_rate=0.005,
                  reward_decay=0.9,
                  e_greedy=0.9,
-                 replace_target_iter=300,
-                 memory_size=500,
+                 replace_target_iter=200,
+                 memory_size=3000,
                  batch_size=32,
                  e_greedy_increment=None,
-                 output_graph=False
+                 double_q=False,
                  ):
         self.n_actions = n_actions
         self.n_features = n_features
@@ -26,7 +26,7 @@ class DQN:
         self.epsilon_increment = e_greedy_increment
         # e_increment 从0开始加
         self.epsilon = 0 if e_greedy_increment is not None else self.epsilon_max
-
+        self.double_q = double_q
         self.learn_step_counter = 0
         self.memory = np.zeros((self.memory_size, n_features * 2 + 2))
 
@@ -67,6 +67,7 @@ class DQN:
         # target_net
         self.s_ = tf.placeholder(tf.float32, [None, self.n_features], name='s_')
         with tf.variable_scope('target_net'):
+            # can be simplified
             c_names = ['target_net_p', tf.GraphKeys.GLOBAL_VARIABLES]
             with tf.variable_scope('l1'):
                 w1 = tf.get_variable('w3', [self.n_features, n_l1], initializer=w_init)
@@ -98,9 +99,16 @@ class DQN:
             action_value = self.sess.run(self.q_eval, feed_dict={self.s: observation}) # recursively fill placeholder
             # return the indices
             action = np.argmax(action_value)
+
+            # if not hasattr(self, 'q'):  # record action value it gets
+            #     self.q = []
+            #     self.running_q = 0
+            # self.running_q = self.running_q * 0.99 + 0.01 * np.max(action_value)
+            # self.q.append(self.running_q)
         else:
             action = np.random.randint(0, self.n_actions)
         return action
+
 
     def learn(self):
         if self.learn_step_counter % self.replace_target_iter == 0:
@@ -114,19 +122,24 @@ class DQN:
             sample_index = np.random.choice(self.memory_counter, size=self.batch_size)
         batch_memory = self.memory[sample_index, :]
 
-        q_next, q_eval = self.sess.run(
+        q_next, q_eval4next = self.sess.run(
             [self.q_next, self.q_eval],
-            feed_dict={
-                self.s_: batch_memory[:, -self.n_features:], # fixted params
-                self.s: batch_memory[:, :self.n_features] # newest params
-            })
+            feed_dict={self.s_: batch_memory[:, -self.n_features:],  # next observation
+                       self.s: batch_memory[:, -self.n_features]})  # next observation
+        q_eval = self.sess.run(self.q_eval, {self.s: batch_memory[:, :self.n_features]})
 
         q_target = q_eval.copy()
         batch_index = np.arange(self.batch_size, dtype=np.int32)
         eval_act_index = batch_memory[:, self.n_features].astype(int)
         reward = batch_memory[:, self.n_features + 1]
 
-        q_target[batch_index, eval_act_index] = reward + self.gamma * np.max(q_next, axis=1)
+        if self.double_q:
+            max_act4next = np.argmax(q_eval4next, axis=1)  # choose the highest value from q_eval
+            selected_q_next = q_next[batch_index, max_act4next]
+        else:
+            selected_q_next = np.max(q_next, axis=1)  # natural DQN
+
+        q_target[batch_index, eval_act_index] + reward + self.gamma * selected_q_next
 
         _, self.cost = self.sess.run([self._train_op, self.loss],
                                      feed_dict={self.s: batch_memory[:, :self.n_features],
@@ -135,12 +148,3 @@ class DQN:
 
         self.epsilon = self.epsilon + self.epsilon_increment if self.epsilon < self.epsilon.max else self.epsilon.max
         self.learn_step_counter += 1
-
-    def plot_cost(self):
-        import matplotlib.pyplot as plt
-        plt.plot(np.arange(len(self.cost_all)), self.cost_all)
-        plt.ylabel('Cost')
-        plt.xlabel('training steps')
-        plt.show()
-
-
